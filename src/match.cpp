@@ -88,7 +88,8 @@ int Match::countUnique(vector<Match*>& matches) {
     return count;
 }
 
+// Escape base quality value as `\"` to avoid json parsing error
 void Match::printReadToJson(ofstream& file, string pad) {
     file << pad << "\"seq\":" << "\"" <<  mRead->mSeq.mStr << "\"," << endl;
-    file << pad << "\"qual\":" << "\"" <<  mRead->mQuality << "\"" << endl;
+    file << pad << "\"qual\":" << "\"" <<  replace(mRead->mQuality, "\"", "\\\"") << "\"" << endl;
 }
