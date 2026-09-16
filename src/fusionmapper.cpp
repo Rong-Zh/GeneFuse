@@ -21,8 +21,8 @@ FusionMapper::~FusionMapper(){
         mIndexer = NULL;
     }
     if(fusionMatches!=NULL) {
-        //delete fusionMatches;
-        //fusionMatches = NULL;
+        delete[] fusionMatches;
+        fusionMatches = NULL;
     }
 }
 
@@ -264,7 +264,7 @@ void FusionMapper::removeAlignables() {
 void FusionMapper::sortMatches() {
     // sort the matches to make the pileup more clear
     for(int i=0;i<mFusionMatchSize;i++){
-        sort(fusionMatches[i].begin(), fusionMatches[i].end(), Match::greater); 
+        stable_sort(fusionMatches[i].begin(), fusionMatches[i].end(), Match::greater);
     }
 }
 
@@ -319,5 +319,5 @@ void FusionMapper::clusterMatches() {
 }
 
 void FusionMapper::sortFusionResults() {
-    sort(mFusionResults.begin(), mFusionResults.end(), moreReads);
+    stable_sort(mFusionResults.begin(), mFusionResults.end(), moreReads);
 }

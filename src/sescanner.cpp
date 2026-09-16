@@ -2,8 +2,7 @@
 #include "fastqreader.h"
 #include <iostream>
 #include "htmlreporter.h"
-#include <unistd.h>
-#include <functional>
+#include <stdexcept>
 #include <thread>
 #include <memory.h>
 #include "util.h"
@@ -15,7 +14,6 @@ SingleEndScanner::SingleEndScanner(string fusionFile, string refFile, string rea
     mRefFile = refFile;
     mHtmlFile = html;
     mJsonFile = json;
-    mProduceFinished = false;
     mThreadNum = threadNum;
     mFusionMapper = NULL;
 }
@@ -28,26 +26,52 @@ SingleEndScanner::~SingleEndScanner() {
 }
 
 bool SingleEndScanner::scan(){
+    if (mThreadNum < 1)
+        throw std::invalid_argument("worker thread count must be positive");
 
+    mQueues.clear();
+    delete mFusionMapper;
     mFusionMapper = new FusionMapper(mRefFile, mFusionFile);
+    mWorkerMatches.clear();
+    mWorkerMatches.resize(mThreadNum);
+    mNextQueue = 0;
+    const uint32_t queueSize =
+        static_cast<uint32_t>(PACK_IN_MEM_LIMIT / mThreadNum + 2);
+    mQueues.reserve(mThreadNum);
+    for (int t = 0; t < mThreadNum; ++t)
+        mQueues.emplace_back(std::make_unique<ProducerConsumerQueue<ReadPack*>>(queueSize));
 
-    initPackRepository();
-    std::thread producer(std::bind(&SingleEndScanner::producerTask, this));
-
-    std::thread** threads = new thread*[mThreadNum];
-    for(int t=0; t<mThreadNum; t++){
-        threads[t] = new std::thread(std::bind(&SingleEndScanner::consumerTask, this));
-    }
+    std::vector<std::thread> workers;
+    workers.reserve(mThreadNum);
+    for (int t = 0; t < mThreadNum; ++t)
+        workers.emplace_back(&SingleEndScanner::consumerTask, this, static_cast<size_t>(t));
+    std::thread producer(&SingleEndScanner::producerTask, this);
 
     producer.join();
-    for(int t=0; t<mThreadNum; t++){
-        threads[t]->join();
-    }
+    for (auto& worker : workers)
+        worker.join();
 
-    for(int t=0; t<mThreadNum; t++){
-        delete threads[t];
-        threads[t] = NULL;
+    // Each worker's matches already follow its packs in input order.
+    // Merge the worker lists by producer-assigned pack number.
+    std::vector<size_t> offsets(mWorkerMatches.size(), 0);
+    while (true) {
+        size_t selected = mWorkerMatches.size();
+        for (size_t worker = 0; worker < mWorkerMatches.size(); ++worker) {
+            const auto& matches = mWorkerMatches[worker];
+            if (offsets[worker] == matches.size())
+                continue;
+            if (selected == mWorkerMatches.size() ||
+                matches[offsets[worker]].packOrdinal <
+                    mWorkerMatches[selected][offsets[selected]].packOrdinal)
+                selected = worker;
+        }
+        if (selected == mWorkerMatches.size())
+            break;
+        mFusionMapper->addMatch(
+            mWorkerMatches[selected][offsets[selected]++].match);
     }
+    for (auto& workerMatches : mWorkerMatches)
+        std::vector<OrderedMatch>().swap(workerMatches);
 
     mFusionMapper->filterMatches();
     mFusionMapper->sortMatches();
@@ -61,158 +85,81 @@ bool SingleEndScanner::scan(){
     return true;
 }
 
-void SingleEndScanner::pushMatch(Match* m){
-    std::unique_lock<std::mutex> lock(mFusionMtx);
-    mFusionMapper->addMatch(m);
-    lock.unlock();
-}
-
-bool SingleEndScanner::scanSingleEnd(ReadPack* pack){
+bool SingleEndScanner::scanSingleEnd(ReadPack* pack, std::vector<OrderedMatch>& workerMatches){
     for(int p=0;p<pack->count;p++){
         Read* r1 = pack->data[p];
         bool mapable = false;
         Match* matchR1 = mFusionMapper->mapRead(r1, mapable);
         if(matchR1){
             matchR1->addOriginalRead(r1);
-            pushMatch(matchR1);
+            workerMatches.push_back({pack->ordinal, matchR1});
         } else if(mapable){
             Read* rcr1 = r1->reverseComplement();
             Match* matchRcr1 = mFusionMapper->mapRead(rcr1, mapable);
             if(matchRcr1){
                 matchRcr1->addOriginalRead(r1);
                 matchRcr1->setReversed(true);
-                pushMatch(matchRcr1);
+                workerMatches.push_back({pack->ordinal, matchRcr1});
             }
             delete rcr1;
         }
         delete r1;
     }
 
-    delete pack->data;
+    delete[] pack->data;
     delete pack;
 
     return true;
 }
 
-void SingleEndScanner::initPackRepository() {
-    mRepo.packBuffer = new ReadPack*[PACK_NUM_LIMIT];
-    memset(mRepo.packBuffer, 0, sizeof(ReadPack*)*PACK_NUM_LIMIT);
-    mRepo.writePos = 0;
-    mRepo.readPos = 0;
-    mRepo.readCounter = 0;
-    
-}
-
-void SingleEndScanner::destroyPackRepository() {
-    delete mRepo.packBuffer;
-    mRepo.packBuffer = NULL;
-}
-
 void SingleEndScanner::producePack(ReadPack* pack){
-    std::unique_lock<std::mutex> lock(mRepo.mtx);
-    while(((mRepo.writePos + 1) % PACK_NUM_LIMIT)
-        == mRepo.readPos) {
-        mRepo.repoNotFull.wait(lock);
-    }
-
-    mRepo.packBuffer[mRepo.writePos] = pack;
-    mRepo.writePos++;
-
-    if (mRepo.writePos == PACK_NUM_LIMIT)
-        mRepo.writePos = 0;
-
-    mRepo.repoNotEmpty.notify_all();
-    lock.unlock();
-}
-
-void SingleEndScanner::consumePack(){
-    ReadPack* data;
-    std::unique_lock<std::mutex> lock(mRepo.mtx);
-    // read buffer is empty, just wait here.
-    while(mRepo.writePos % PACK_NUM_LIMIT == mRepo.readPos % PACK_NUM_LIMIT) {
-        if(mProduceFinished){
-            lock.unlock();
+    // Try each dedicated SPSC queue before waiting for a full one.
+    const size_t queueCount = mQueues.size();
+    for (size_t attempt = 0; attempt < queueCount; ++attempt) {
+        const size_t index = (mNextQueue + attempt) % queueCount;
+        if (mQueues[index]->write(pack)) {
+            mNextQueue = (index + 1) % queueCount;
             return;
         }
-        mRepo.repoNotEmpty.wait(lock);
     }
-
-    data = mRepo.packBuffer[mRepo.readPos];
-    mRepo.readPos++;
-
-    if (mRepo.readPos >= PACK_NUM_LIMIT)
-        mRepo.readPos = 0;
-
-    lock.unlock();
-    mRepo.repoNotFull.notify_all();
-
-    scanSingleEnd(data);
+    mQueues[mNextQueue]->writeBlocking(pack);
+    mNextQueue = (mNextQueue + 1) % queueCount;
 }
 
 void SingleEndScanner::producerTask()
 {
-    int slept = 0;
-    Read** data = new Read*[PACK_SIZE];
-    memset(data, 0, sizeof(Read*)*PACK_SIZE);
-    FastqReader reader1(mRead1File);
-    int count=0;
-    while(true){
-        Read* read = reader1.read();
-        if(!read){
-            // the last pack
-            ReadPack* pack = new ReadPack;
-            pack->data = data;
-            pack->count = count;
-            producePack(pack);
-            data = NULL;
+    Read** data = new Read*[PACK_SIZE]();
+    FastqReader reader(mRead1File);
+    int count = 0;
+    size_t packOrdinal = 0;
+    while (true) {
+        Read* read = reader.read();
+        if (!read) {
+            producePack(new ReadPack{data, count, packOrdinal++});
             break;
         }
-        data[count] = read;
-        count++;
-        // a full pack
-        if(count == PACK_SIZE){
-            ReadPack* pack = new ReadPack;
-            pack->data = data;
-            pack->count = count;
-            producePack(pack);
-            //re-initialize data for next pack
-            data = new Read*[PACK_SIZE];
-            memset(data, 0, sizeof(Read*)*PACK_SIZE);
-            // reset count to 0
+        data[count++] = read;
+        if (count == PACK_SIZE) {
+            producePack(new ReadPack{data, count, packOrdinal++});
+            data = new Read*[PACK_SIZE]();
             count = 0;
-            // if the consumer is far behind this producer, sleep and wait to limit memory usage
-            while(mRepo.writePos - mRepo.readPos > PACK_IN_MEM_LIMIT){
-                //cout<<"sleep"<<endl;
-                slept++;
-                usleep(1000);
-            }
         }
     }
 
-    std::unique_lock<std::mutex> lock(mRepo.readCounterMtx);
-    mProduceFinished = true;
-    lock.unlock();
-
-    // if the last data initialized is not used, free it
-    if(data != NULL)
-        delete data;
+    // A terminal record follows all data in each worker's queue.
+    for (auto& queue : mQueues)
+        queue->writeBlocking(static_cast<ReadPack*>(nullptr));
 }
 
-void SingleEndScanner::consumerTask()
+void SingleEndScanner::consumerTask(size_t queueIndex)
 {
-    while(true) {
-        std::unique_lock<std::mutex> lock(mRepo.readCounterMtx);
-        if(mProduceFinished && mRepo.writePos == mRepo.readPos){
-            lock.unlock();
+    ReadPack* pack = nullptr;
+    auto& queue = *mQueues[queueIndex];
+    while (true) {
+        queue.readBlocking(pack);
+        if (!pack)
             break;
-        }
-        if(mProduceFinished){
-            consumePack();
-            lock.unlock();
-        } else {
-            lock.unlock();
-            consumePack();
-        }
+        scanSingleEnd(pack, mWorkerMatches[queueIndex]);
     }
 }
 

@@ -11,12 +11,16 @@ TARGET = genefuse
 BIN_TARGET = ${TARGET}
 
 CC = g++
-CFLAGS = -std=c++11 -g -I${DIR_INC}
+HTS_ROOT = ./deps/htslib
+HTS_STATIC_LIB = ${HTS_ROOT}/lib/libhts.a
+CFLAGS = -std=c++20 -g -I${DIR_INC} -I${HTS_ROOT}/include -MMD -MP
+LDFLAGS = -static
+STATIC_LIBS = ${HTS_STATIC_LIB} -ldeflate -llzma -lbz2 -lz -lm -lpthread -ldl
 
-${BIN_TARGET}:${OBJ}
-	$(CC) $(OBJ) -lz -lpthread -o $@
+${BIN_TARGET}:${OBJ} ${HTS_STATIC_LIB}
+	$(CC) ${LDFLAGS} $(OBJ) ${STATIC_LIBS} -o $@
     
-${DIR_OBJ}/%.o:${DIR_SRC}/%.cpp make_obj_dir
+${DIR_OBJ}/%.o:${DIR_SRC}/%.cpp | make_obj_dir
 	$(CC) $(CFLAGS) -O3 -c  $< -o $@
 .PHONY:clean
 clean:
@@ -32,3 +36,5 @@ make_obj_dir:
 install:
 	install $(TARGET) $(BINDIR)/$(TARGET)
 	@echo "Installed."
+
+-include ${OBJ:.o=.d}

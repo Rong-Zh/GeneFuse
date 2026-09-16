@@ -8,8 +8,10 @@
 #include "fusion.h"
 #include "match.h"
 #include <cstdlib>
-#include <condition_variable>
-#include <mutex>
+#include "ProducerConsumerQueue.h"
+#include <cstddef>
+#include <memory>
+#include <vector>
 #include <thread>
 #include "fusionmapper.h"
 
@@ -19,22 +21,10 @@ using namespace std;
 struct ReadPairPack {
     ReadPair** data;
     int count;
+    size_t ordinal;
 };
 
 typedef struct ReadPairPack ReadPairPack;
-
-struct ReadPairRepository {
-    ReadPairPack** packBuffer;
-    size_t readPos;
-    size_t writePos;
-    size_t readCounter;
-    std::mutex mtx;
-    std::mutex readCounterMtx;
-    std::condition_variable repoNotFull;
-    std::condition_variable repoNotEmpty;
-};
-
-typedef struct ReadPairRepository ReadPairRepository;
 
 class PairEndScanner{
 public:
@@ -46,14 +36,14 @@ public:
     void jsonReport();
 
 private:
-    bool scanPairEnd(ReadPairPack* pack);
-    void initPackRepository();
-    void destroyPackRepository();
+    struct OrderedMatch {
+        size_t packOrdinal;
+        Match* match;
+    };
+    bool scanPairEnd(ReadPairPack* pack, std::vector<OrderedMatch>& workerMatches);
     void producePack(ReadPairPack* pack);
-    void consumePack();
     void producerTask();
-    void consumerTask();
-    void pushMatch(Match* m);
+    void consumerTask(size_t queueIndex);
 
 private:
     string mFusionFile;
@@ -62,9 +52,9 @@ private:
     string mRead2File;
     string mHtmlFile;
     string mJsonFile;
-    ReadPairRepository mRepo;
-    bool mProduceFinished;
-    std::mutex mFusionMtx;
+    std::vector<std::unique_ptr<ProducerConsumerQueue<ReadPairPack*>>> mQueues;
+    size_t mNextQueue;
+    std::vector<std::vector<OrderedMatch>> mWorkerMatches;
     int mThreadNum;
     FusionMapper* mFusionMapper;
 };

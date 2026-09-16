@@ -27,8 +27,13 @@ genefusion
 *.la
 *.a
 *.lib
+!deps/htslib/lib/libhts.a
 
 # Executables
 *.exe
 *.out
 *.app
+
+# Local build outputs
+*.d
+genefuse

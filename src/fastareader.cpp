@@ -1,102 +1,87 @@
-
 #include "fastareader.h"
 #include "util.h"
-#include <sstream>
+#include <htslib/bgzf.h>
+#include <htslib/kseq.h>
+#include <stdexcept>
+#include <utility>
+
+KSEQ_INIT(BGZF*, bgzf_read)
+
+struct FastaReader::ReaderState {
+    explicit ReaderState(const string& filename)
+        : file(bgzf_open(filename.c_str(), "r")), sequence(nullptr)
+    {
+        if (!file)
+            throw invalid_argument("Could not open reference FASTA: " + filename);
+        sequence = kseq_init(file);
+        if (!sequence) {
+            bgzf_close(file);
+            throw bad_alloc();
+        }
+    }
+
+    ~ReaderState() {
+        kseq_destroy(sequence);
+        bgzf_close(file);
+    }
+
+    BGZF* file;
+    kseq_t* sequence;
+};
 
 FastaReader::FastaReader(string faFile, bool forceUpperCase)
+    : mFastaFile(std::move(faFile)),
+      mForceUpperCase(forceUpperCase),
+      mReachedEnd(false)
 {
-    // Set locale and disable stdio synchronization to improve iostream performance
-    // http://www.drdobbs.com/the-standard-librarian-iostreams-and-std/184401305
-    // http://stackoverflow.com/questions/5166263/how-to-get-iostream-to-perform-better
-    setlocale(LC_ALL,"C");
-    ios_base::sync_with_stdio(false);
-
-    mFastaFile = faFile;
-    mForceUpperCase = forceUpperCase;
-    if (is_directory(mFastaFile)) {
-        string error_msg = "There is a problem with the provided fasta file: \'";
-        error_msg.append(mFastaFile);
-        error_msg.append("\' is a directory NOT a file...\n");
-        throw invalid_argument(error_msg);
-    }
-    mFastaFileStream.open( mFastaFile.c_str(),ios::in);
-    // verify that the file can be read
-    if (!mFastaFileStream.is_open()) {
-        string msg = "There is a problem with the provided fasta file: could NOT read ";
-        msg.append(mFastaFile.c_str());
-        msg.append("...\n");
-        throw invalid_argument(msg);
-    }
-
-    char c;
-    // seek to first contig
-    while (mFastaFileStream.get(c) && c != '>') {
-        if (mFastaFileStream.eof()) {
-            break;
-        }
-    }
+    if (is_directory(mFastaFile))
+        throw invalid_argument("Reference FASTA is a directory: " + mFastaFile);
+    mReader = std::make_unique<ReaderState>(mFastaFile);
 }
 
-FastaReader::~FastaReader()
-{
-    if (mFastaFileStream.is_open()) {
-        mFastaFileStream.close();
-    }
-}
-
-void FastaReader::readNext()
-{
-    mCurrentID = "";
-    mCurrentDescription = "";
-    mCurrentSequence = "";
-    bool foundHeader = false;
-    
-    char c;
-    stringstream ssSeq;
-    stringstream ssHeader;
-    while(true){
-        mFastaFileStream.get(c);
-        if(c == '>' || mFastaFileStream.eof())
-            break;
-        else {
-            if (foundHeader){
-                if(mForceUpperCase && c>='a' && c<='z') {
-                    c -= ('a' - 'A');
-                }
-                ssSeq << c;
-            }
-            else
-                ssHeader << c;
-        }
-
-        string line = "";
-        getline(mFastaFileStream,line,'\n');
-
-
-        if(foundHeader == false) {
-            ssHeader << line;
-            foundHeader = true;
-        }
-        else {
-            str_keep_valid_sequence(line, mForceUpperCase);
-            ssSeq << line;
-        }
-    }
-    mCurrentSequence = ssSeq.str();
-    string header = ssHeader.str();
-
-    int space = header.find(" ");
-    mCurrentID = header.substr(0, space);
-}
+FastaReader::~FastaReader() = default;
 
 bool FastaReader::hasNext() {
-    return !mFastaFileStream.eof();
+    return !mReachedEnd;
+}
+
+void FastaReader::readNext() {
+    if (mReachedEnd)
+        return;
+
+    const int status = kseq_read(mReader->sequence);
+    if (status == -1) {
+        mReachedEnd = true;
+        mCurrentID.clear();
+        mCurrentDescription.clear();
+        mCurrentSequence.clear();
+        return;
+    }
+    if (status < -1)
+        throw runtime_error("Could not read reference FASTA: " + mFastaFile +
+                            " (htslib status " + to_string(status) + ")");
+
+    const auto* record = mReader->sequence;
+    if (record->name.s)
+        mCurrentID.assign(record->name.s, record->name.l);
+    else
+        mCurrentID.clear();
+    if (record->comment.s)
+        mCurrentDescription.assign(record->comment.s, record->comment.l);
+    else
+        mCurrentDescription.clear();
+    if (record->seq.s)
+        mCurrentSequence.assign(record->seq.s, record->seq.l);
+    else
+        mCurrentSequence.clear();
+    str_keep_valid_sequence(mCurrentSequence, mForceUpperCase);
 }
 
 void FastaReader::readAll() {
-    while(!mFastaFileStream.eof()){
+    while (hasNext()) {
         readNext();
-        mAllContigs[mCurrentID] = mCurrentSequence;
+        if (!mReachedEnd)
+            mAllContigs[mCurrentID] = mCurrentSequence;
     }
 }
 

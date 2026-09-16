@@ -22,7 +22,7 @@ Indexer::Indexer(string refFile, vector<Fusion>& fusions) {
 Indexer::~Indexer() {
     delete mReference;
     mReference = NULL;
-    delete mBloomFilter;
+    delete[] mBloomFilter;
     mBloomFilter = NULL;
 }
 
@@ -115,6 +115,7 @@ void Indexer::indexContig(int ctg, string seq, int start) {
 }
 
 vector<SeqMatch> Indexer::mapRead(Read* r) {
+    const auto& kmerPositions = mKmerPos;
     map<long, int> kmerStat;
     kmerStat[0]=0;
     string seq = r->mSeq.mStr;
@@ -132,7 +133,12 @@ vector<SeqMatch> Indexer::mapRead(Read* r) {
             kmerStat[0]++;
             continue;
         }
-        GenePos gp = mKmerPos[kmer];
+        const auto found = kmerPositions.find(kmer);
+        if (found == kmerPositions.end()) {
+            kmerStat[0]++;
+            continue;
+        }
+        GenePos gp = found->second;
         // is a dupe
         if(gp.contig == DUPE_HIGH_LEVEL) {
             // too much keys in this dupe, then skip it
@@ -189,7 +195,10 @@ vector<SeqMatch> Indexer::mapRead(Read* r) {
         long bit = kmer & 0x07;
         if( (mBloomFilter[pos] & (0x1<<bit)) == 0)
             continue;
-        GenePos gp = mKmerPos[kmer];
+        const auto found = kmerPositions.find(kmer);
+        if (found == kmerPositions.end())
+            continue;
+        GenePos gp = found->second;
         // is a dupe
         if(gp.contig == DUPE_HIGH_LEVEL) {
             // too much keys in this dupe, then skip it
@@ -223,11 +232,12 @@ vector<SeqMatch> Indexer::mapRead(Read* r) {
 
     if(mismatches>GlobalSettings::mismatchThreshold){
         // too many mismatch indicates not a real fusion
+        delete[] mask;
         return vector<SeqMatch>();
     }
 
     vector<SeqMatch> result = segmentMask(mask, seqlen, long2gp(gp1), long2gp(gp2));
-    delete mask;
+    delete[] mask;
 
     return result;
 }

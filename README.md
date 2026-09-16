@@ -23,6 +23,7 @@ wget http://opengene.org/GeneFuse/genefuse
 chmod a+x ./genefuse
 ```
 ## or compile from source
+The bundled deps/htslib library is linked statically. Building requires static libdeflate, liblzma, libbz2 and zlib development libraries; running GeneFuse does not require htslib or these shared libraries.
 ```shell
 # get source (you can also use browser to download from master or releases)
 git clone https://github.com/OpenGene/genefuse.git
@@ -50,10 +51,10 @@ genefuse -r hg19.fasta -f genes/druggable.hg19.csv -1 genefuse.R1.fq.gz -2 genef
 ```
 
 ## Reference genome
-The reference genome should be a single whole FASTA file containg all chromosome data. This file shouldn't be compressed. For human data, typicall `hg19/GRch37` or `hg38/GRch38` assembly is used, which can be downloaded from following sites:
+The reference genome should be a single whole FASTA file containg all chromosome data. Plain and gzip/BGZF-compressed FASTA files are accepted. For human data, typicall `hg19/GRch37` or `hg38/GRch38` assembly is used, which can be downloaded from following sites:
 * `hg19/GRch37`: https://hgdownload.cse.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz
 * `hg38/GRch38`: https://hgdownload.cse.ucsc.edu/goldenpath/hg38/bigZips/hg38.fa.gz  
-Remember to decompress hg19.fa.gz/hg38.fa.gz since it is gzipped and is not supported currently.
+GeneFuse accepts plain FASTA and gzip/BGZF-compressed FASTA (.fa.gz) through htslib; decompression is not required.
 
 ## Fusion file
 The fusion file is a list of coordinated target genes together with their exons. A sample is:

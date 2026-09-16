@@ -47,11 +47,6 @@ int main(int argc, char* argv[]){
     GlobalSettings::setOutputUntranslated(outputUntranslated);
 
 
-    if(ends_with(refFile, ".gz") || ends_with(refFile, ".gz")) {
-        cout << "reference fasta file should not be compressed.\nplease unzip "<<refFile<<" and try again."<<endl;
-        exit(-1);
-    }
-
     stringstream ss;
     for(int i=0;i<argc;i++){
         ss << argv[i] << " ";
