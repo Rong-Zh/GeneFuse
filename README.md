@@ -3,6 +3,27 @@ https://anaconda.org/bioconda/genefuse/badges/version.svg)](https://anaconda.org
 # GeneFuse
 A tool to detect and visualize target gene fusions by scanning FASTQ files directly. This tool accepts FASTQ files and reference genome as input, and outputs detected fusion results in TEXT, JSON and HTML formats.
 
+# How GeneFuse works
+GeneFuse is a **targeted split-read fusion detector**. It searches only the genes and genomic intervals listed in the fusion CSV file, so it is intended for fast detection of known candidate genes rather than unrestricted genome-wide fusion discovery.
+
+The analysis has the following stages:
+
+1. **Build the target-gene index.** GeneFuse reads the reference FASTA with htslib, extracts every interval declared in the fusion file, and indexes both the forward sequence and its reverse complement. The index uses 16-base k-mers. A Bloom filter rejects absent k-mers quickly, while repetitive k-mers are tracked separately or ignored when they occur too often.
+
+2. **Scan FASTQ reads for split mappings.** Each read is sampled with 16-mers to find its two strongest candidate genomic positions. A second, base-level pass assigns the read bases to those two candidates. A read becomes a fusion candidate only when it contains two sufficiently long segments (more than 20 bases each) that map to two target positions in a valid orientation. The initial defaults require at least 40 bases of support for the stronger side, 20 bases for the weaker side, and no more than 10 unmatched bases.
+
+3. **Handle read orientation and paired-end data.** GeneFuse normalizes supporting reads to one orientation and checks the reverse complement when needed. For paired-end input, overlapping mates are merged first and the merged sequence is scanned; if they cannot be merged, R1 and R2 are scanned separately.
+
+4. **Infer and refine the breakpoint.** The split between the two mapped segments gives an initial breakpoint on the read and on both genes. GeneFuse compares each side with its reference sequence using edit distance, then tests shifts from -3 to +3 bases around the breakpoint and retains the best local placement.
+
+5. **Remove likely false positives.** Candidates are discarded when either side is short or low-complexity, the combined edit distance is at least 5, the event is a same-gene short deletion (shorter than `--deletion`, 50 bases by default), or the complete read can align elsewhere in the reference genome. Final breakpoint groups also require adequate reference sequence on both sides and cannot be explained by aligning one breakpoint flank to the other.
+
+6. **Cluster and report events.** Candidates with the same ordered gene pair and breakpoint coordinates within 3 bases are grouped. GeneFuse prefers an exact zero-gap observation for the representative breakpoint; otherwise it uses the mean coordinates. It counts total supporting reads and unique support, where uniqueness is based on read length and the breakpoint position within the read. An event is reported only when its unique support reaches `--unique` (2 by default). Results are sorted by support and written as text, JSON, and interactive HTML with gene, exon/intron, strand, breakpoint, and supporting-read details.
+
+FASTQ input is processed in packs by one producer and multiple worker threads. Each worker has a dedicated single-producer/single-consumer queue. Matches are merged again by the producer-assigned pack order, so changing `--thread` does not change the ordering of equal-scoring supporting reads in the report.
+
+Because GeneFuse is targeted and relies mainly on split-read evidence, genes absent from the fusion CSV are not searched, and a fusion without enough sequence spanning its breakpoint may not be detected.
+
 # Take a quick glance of the informative report
 * Sample HTML report: http://opengene.org/GeneFuse/report.html
 * Sample JSON report: http://opengene.org/GeneFuse/report.json
